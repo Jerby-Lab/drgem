@@ -12,3 +12,11 @@ or download the compressed R package and use:
 
 # **Citation**
 Please cite this work at: 
+
+# **License** 
+
+BSD 3-Clause License provided ([here](https://github.com/Jerby-Lab/drgem/blob/main/LICENSE)).
+
+## **Contact**
+
+For any inquiries on this repository please feel free to post these under "issues" or reach out to Christine Yiwen Yeh ([cyyeh@stanford.edu](cyyeh@stanford.edu)) and Livnat Jerby ([ljerby@stanford.edu](ljerby@stanford.edu)).
