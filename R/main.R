@@ -1,3 +1,332 @@
+#' Distributionally robust initialization
+#'
+#' Use PCA as diagnostic tool for a distributionally robust initialization
+#'
+#' @param X Seurat object to be processed.
+#' @param meta Vector of class labels to subsample.
+#' @param preprocess Logical, whether to reprocess the Seurat object during each iteration.
+#' @param scale.data Number of iterations for subsampling.
+#' @param n_dims Number of subsamples per class.
+#' @param beta Number of principal components to use for PCA.
+#' @param viz Number of features to use for variable feature selection.
+#' @param var_features Metadata field to use for alignment.
+#' @param align Logical, whether to align clusters during each iteration.
+#' @param params List of additional parameters for clustering and UMAP.
+#' @return seurat object with weak labels
+#' @export
+drgem_phaseI <- function(X,
+                         meta,
+                         preprocess = T,
+                         scale.data = NULL,
+                         n_dims = 20,
+                         beta = 0.3,
+                         viz = T,
+                         var_features = NULL,
+                         align = T,
+                         field1 = "labels",
+                         field2 = "seurat_clusters",
+                         field_aligned = "weak_clusters",
+                         params1 = list("nfeatures" = 200),
+                         params2 = list("res" = 0.12, "min.dist" = 0.1,
+                                        "k.param" = 20, "return.model" = F)
+) {
+  # diagnostic PCA
+  obj <- initialize_pca(X,
+                        meta = meta,
+                        preprocess = preprocess,
+                        scale.data = scale.data,
+                        n_dims = n_dims,
+                        params = params1,
+                        var_features = var_features)
+
+  # fit model on high risk cells to obtain E(init)
+  high_recon_cells = row.names(
+    dplyr::filter(obj@meta.data,
+                  recon_loss > quantile(obj@meta.data$recon_loss, 1-beta)))
+  hrlobj <- initialize_pca(X = X[,high_recon_cells],
+                           meta = meta[high_recon_cells,],
+                           preprocess = F,
+                           scale.data = obj@assays$RNA$scale.data[,high_recon_cells],
+                           n_dims = n_dims,
+                           var_features = var_features,
+                           params = params1)
+
+  # transfer full dataset to E(init) to obtain E(1)
+  iobj <- transfer_embedding(hrlobj, obj)
+  # obtain c(1)
+  iobj <- cluster_and_viz(iobj,
+                          n_dims=n_dims,
+                          reduction = "hrlpca",
+                          viz = viz,
+                          align = align,
+                          field1 = field1,
+                          field2 = field2,
+                          field_aligned = field_aligned,
+                          params = params2)
+  return(iobj)
+}
+
+#' Calculate Sample Confidence
+#'
+#' Iteratively performs sub-sampling and PCA, then assigns confidence scores to clusters.
+#'
+#' @param iobj Seurat object to be processed.
+#' @param query Vector of class labels to subsample.
+#' @param reprocess Logical, whether to reprocess the Seurat object during each iteration.
+#' @param n_iter Number of iterations for subsampling.
+#' @param n_sub Number of subsamples per class.
+#' @param n_dims Number of principal components to use for PCA.
+#' @param n_features Number of features to use for variable feature selection.
+#' @param field Metadata field to use for alignment.
+#' @param align Logical, whether to align clusters during each iteration.
+#' @param params List of additional parameters for clustering and UMAP.
+#' @return A dataframe with assigned clusters and confidence scores for each cell.
+#' @export
+drgem_phaseII <- function(iobj,
+                          query = c(1, 2, 3, 4, 5),
+                          assign = c(1, 2, 3, 4, 5),
+                          # confounding = c(),
+                          sigs = NULL,
+                          markers_field = "markers.scores",
+                          reprocess = F,
+                          n_iter = 800,
+                          n_sub = 600,
+                          n_dims = 30,
+                          n_features = 155,
+                          field = "predicted_clusters",
+                          align = T,
+                          params = list("res" = 1.0,
+                                        "min.dist" = 0.1,
+                                        "k.param"=10,
+                                        "return.model"= F),
+                          var_features = row.names(iobj))
+{
+  # iterative sub-sampling based on equal density of weak labels
+  df <- parallel::mclapply(1:n_iter, mc.cores=10, function(i){
+    set.seed(i)
+
+    # run dimension reduction on balanced sub-sample
+    subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
+    temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[,subsample],
+                               meta = iobj@meta.data[subsample,],
+                               preprocess = F,
+                               scale.data = iobj[["RNA"]]$scale.data[,subsample],
+                               n_dims = n_dims,
+                               params = list("nfeatures" = n_features),
+                               var_features = var_features)
+
+    # run clustering on balanced sub-sample
+    temp_obj = cluster_and_viz(temp_obj,
+                               n_dims = n_dims,
+                               reduction = "pca",
+                               viz = F,
+                               align = align,
+                               field1 = field,
+                               field2 = "seurat_clusters",
+                               field_aligned = "predicted_clusters",
+                               params = params)
+
+    final = rep(NA, dim(iobj)[2])
+    names(final) = colnames(iobj)
+    final[colnames(temp_obj)] <- as.character(temp_obj@meta.data[["predicted_clusters"]])
+    return(final)
+  })
+
+  df = do.call("cbind.data.frame", df[which(unlist(lapply(df, length)) == dim(iobj)[2])])
+  colnames(df) <- NULL
+
+  # do score aggregation
+  assignments <- t(apply(df, 1, label_consensus, query=query))
+  assignments = data.frame(assignments)
+  assignments$confidence <- as.numeric(assignments$confidence)
+  assignments$n <- as.numeric(assignments$n)
+  row.names(assignments) <- colnames(iobj)
+
+  # get counts
+  counts <- data.frame(t(apply(df, 1, count_assignments, query=query)))
+  row.names(counts) <- colnames(iobj)
+
+  #merge
+  assignments = cbind(assignments, counts)
+  return(assignments)
+}
+
+
+#' Perform Final Embedding
+#'
+#' Performs final embedding on high-confidence subsampled cells.
+#'
+#' @param iobj Seurat object to be processed.
+#' @param assignments Dataframe with assignment labels and confidence scores.
+#' @param thres Confidence threshold for selecting samples.
+#' @param thres_by_class Class-specific confidence thresholds.
+#' @param n_dims Number of principal components to use for the final embedding.
+#' @param subsample_density List indicating the number of samples to subsample per class.
+#' @return The Seurat object with the final embedding and cluster visualization.
+#' @export
+drgem_phaseIII <- function(iobj,
+                           assignments,
+                           thres = 0.95,
+                           thres_by_class = NULL,
+                           n_dims = 20,
+                           n_features = 200,
+                           subsample_density = c("1" = 800,
+                                                 "2" = 500,
+                                                 "3" = 450,
+                                                 "4" = 400,
+                                                 "5" = 50),
+                           params=list("res" = 0.18, "min.dist" = 0.1, "k.param" = 10),
+                           return_ref=F){
+  # threshold on confidence
+  if (is.null(thres) & is.null(thres_by_class)) {
+    cells = row.names(assignments)
+  } else if (!is.null(thres) & !is.null(thres_by_class)) {
+    print("ambiguous thresholding input...")
+    return()
+  } else if (!is.null(thres) & is.null(thres_by_class)) {
+    cells = row.names(dplyr::filter(assignments, confidence > thres))
+  } else {
+    cells = do.call("c", lapply(names(thres_by_class), function(x){
+      xcells = row.names(dplyr::filter(assignments,
+                                       assignment == x,
+                                       confidence >= thres_by_class[x]))
+    }))
+  }
+
+  # subsample
+  high_conf_cells <- subsample_per_class(assignments,
+                                         cells,
+                                         subsample_density)
+
+  # fit on high confidence subsample
+  refobj <- initialize_pca(X = iobj[["RNA"]]$counts[,high_conf_cells],
+                           meta = iobj@meta.data[high_conf_cells,],
+                           preprocess = T,
+                           scale.data = NULL,
+                           n_dims = n_dims,
+                           params = list("nfeatures" = n_features))
+
+  X_scaled = refobj[["RNA"]]$scale.data
+  U = Seurat::Loadings(refobj, reduction = "pca")
+  feats = intersect(row.names(X_scaled), row.names(U))
+  recon_loss <- calc_recon_loss(X_scaled, U, n_dims)
+  refobj@meta.data$recon_loss <- recon_loss
+  refobj@meta.data$final_predictions <- assignments[colnames(refobj),]$assignment
+  refobj@meta.data$confidence_scores <- assignments[colnames(refobj),]$confidence_scores
+
+  refobj <- Seurat::RunUMAP(refobj, dims =1:n_dims,return.model = T)
+
+  anchors <- Seurat::FindTransferAnchors(
+    reference = refobj,
+    features = row.names(iobj),
+    query = iobj,
+    reference.reduction = "pca",
+    dims = 1:n_dims
+  )
+
+  query <- Seurat::MapQuery(
+    anchorset = anchors,
+    query = iobj,
+    reference = refobj,
+    reference.reduction = "pca",
+    reduction.model = "umap"
+  )
+
+  query@meta.data$final_predictions <- assignments$assignment
+  query@meta.data$confidence_scores <- assignments$confidence_scores
+  out <- list(query, refobj)
+  return(out)
+}
+
+#' scRNA Marker Based Cell Type Assignments
+#'
+#' Using gene expression markers, unsupervised clusters,
+#' and gene expression, assign the likely celltype to those
+#' clusters
+#'
+#' @param r data list including the gene expression data
+#' @param cell.clusters a _n_-length list to where _n_ is the number of cells
+#' @param cell.sig cell type signatures (list of lists of markers associated with each cell-type, default exists)
+#' @param immune.markers immune markers (default exists)
+#' @param non.immune.cell.types which cell types are not immune cell types?
+#' @param EM.flag run EM? (default = F)
+#' @param OE.type which version of overall-expression to calculate (default = "V1")
+#' @param test.type which kind of test to test marker significance between clusters
+#' @param minZ minimum significance cutoff to assign a cell-type (default = 10)
+#' @return a list with objects named "c" and "m" corresponding to your subsampled counts and metadata
+#' @export
+drgem_phaseIV <- function(obj,
+                          cell.clusters,
+                          cell.sig,
+                          EM.flag = F,
+                          OE.type = "V1",
+                          test.type = "ttest",
+                          minZ = 10,
+                          subsample = T){
+
+  if(missing(cell.sig)){
+    print("cell signatures missing")
+    return()
+  }
+
+  # get marker scores
+  r <- c()
+  r$cd <- obj@assays$RNA$counts
+  r$cells <- colnames(obj)
+  r$genes <- row.names(obj)
+  r$comp.reads <- apply(r$cd, 2, sum)
+  r$tpm <- get.tpm(X = r$cd, comp.reads = r$comp.reads)
+  r$clusters <- cell.clusters
+  r <- prep4OE(r, n.cat = 20)
+  r$markers.scores <- get.OE(r, sig = cell.sig)
+
+  # run pairwise t-test analysis
+  r<-scRNA_cluster.annotation.ttest(r,cell.clusters = cell.clusters,minZ = minZ)
+
+  # save results
+  obj@meta.data <- cbind(obj@meta.data, apply(r$markers.scores, 2, cap_object, q = 0.05))
+  obj@meta.data$final_annotations <- r$cell.types
+  out <- list(obj, r)
+  return(out)
+}
+
+#' Compute _t_-tests
+#'
+#' function for computing two sample _t_-test
+#' on single cell clustered data
+#'
+#' @param r data list including the gene expression data
+#' @param cell.clusters a _n_-length list of cluster assignments, where _n_ = number of cells
+#' @param minZ cutoff for significance in the -log10(p) space (default = 10)
+#' @return data list, but now including `cell.types`, and `assignments.ttests` slots
+#'
+scRNA_cluster.annotation.ttest <- function(r,
+                                           cell.clusters,
+                                           minZ = 10,
+                                           subsample = F) {
+  if (subsample) {
+    b<-sample.per.label(r$clusters,500)
+  }
+
+  b <- rep(TRUE, length(r$clusters))
+
+  z<-plyr::laply(unique(r$clusters),function(x) t.test.mat(t(r$markers.scores[b,]),r$clusters[b]==x)[,3])
+  rownames(z)<-unique(r$clusters)
+  colnames(z) <- colnames(r$markers.scores)
+  z<-cbind.data.frame(z,cell.type1 = colnames(z)[apply(z,1,function(x) which(x==max(x))[1])],
+                      n = rowSums(z>minZ))
+  b2<-z$n>1
+  z$diff<-apply(z[,1:(ncol(z)-2)],1,function(x) sort(x,decreasing = T)[1])-apply(z[,1:(ncol(z)-2)],1,function(x) sort(x,decreasing = T)[2])
+  z$unique<-z$n==1|z$diff>10
+  z$cell.type<-z$cell.type1
+  z$cell.type[!z$unique]<-"UD"
+  r$cell.types<-z[r$clusters,"cell.type"]
+
+  r$assignments.ttests<-z
+  return(r)
+}
+
+
 #' Initialize PCA and Seurat Object
 #'
 #' This function initializes a Seurat object from input data, optionally preprocesses it,
@@ -9,6 +338,7 @@
 #' @param scale.data Scaled data to be used directly if preprocessing is FALSE.
 #' @param n_dims Number of principal components to compute.
 #' @param params List of additional parameters, such as the number of features for variable feature selection (`nfeatures`).
+#' @param var_features List of variable features, if predetermined
 #' @return A Seurat object with PCA results and reconstruction loss added to the metadata.
 #' @export
 initialize_pca <- function(X,
@@ -19,16 +349,12 @@ initialize_pca <- function(X,
                            params = list("nfeatures" = 200),
                            var_features = NULL){
   # Create Seurat Object
-  if (class(X) != "Seurat") {
-    if (is.null(meta)) {
-      obj <- Seurat::CreateSeuratObject(X)
-    } else {
-      obj <- Seurat::CreateSeuratObject(X, meta.data = meta)
-    }
+  if (is.null(meta)) {
+    obj <- Seurat::CreateSeuratObject(X)
   } else {
-    obj <- X
+    obj <- Seurat::CreateSeuratObject(X, meta.data = meta)
   }
-  
+
   # Preprocess Data
   if (preprocess) {
     obj <- Seurat::NormalizeData(obj, verbose = F)
@@ -41,24 +367,22 @@ initialize_pca <- function(X,
     }
     obj <- Seurat::ScaleData(obj, verbose = F)
   } else {
-    obj[["RNA"]]@scale.data = scale.data
+    obj@assays$RNA$scale.data = scale.data
   }
-  
+
   # Run PCA
   if (params[["nfeatures"]] < dim(X)[1]) {
     obj <- Seurat::RunPCA(obj, features = var_features, verbose = F)
-    print("here1")
   } else {
     obj <- Seurat::RunPCA(obj, features = row.names(obj), verbose = F)
-    print("here2")
   }
-  
-  # Calculate Reconstruction Loss
-  X_scaled = obj[["RNA"]]@scale.data
+
+  # Calculate Reconstruction Error
+  X_scaled = obj@assays$RNA$scale.data
   U = Seurat::Loadings(obj, reduction = "pca")
   recon_loss <- calc_recon_loss(X_scaled[row.names(U),], U, n_dims)
   obj@meta.data$recon_loss = recon_loss
-  
+
   return(obj)
 }
 
@@ -87,11 +411,10 @@ cluster_and_viz <- function(obj,
                             align = T,
                             field1 = "labels",
                             field2 = "seurat_clusters",
-                            field_aligned = "predicted_clusters",
+                            field_aligned = "weak_clusters",
                             params = list("res" = 0.12, "min.dist" = 0.1,
                                           "k.param" = 20, "return.model" = F)
 ){
-  
   if(clus){
     if (!("RNA_snn" %in% names(obj@graphs))) {
       obj <- Seurat::FindNeighbors(obj,
@@ -102,21 +425,19 @@ cluster_and_viz <- function(obj,
     }
     obj <- Seurat::FindClusters(obj, resolution = params[["res"]])
   }
-  
-  # print(params[["return.model"]])
-  # print(params)
+
   if (viz){obj <- Seurat::RunUMAP(obj,
                                   dims = 1:(n_dims),
                                   reduction = reduction,
                                   min.dist = params[["min.dist"]],
                                   return.model = params[["return.model"]])}
-  
+
   if (align){
-    mapping = map_clusters(obj@meta.data[[field1]], obj@meta.data[[field2]])
-    obj@meta.data[["predicted_clusters"]] = factor((mapping[obj@meta.data$seurat_clusters]),
-                                                   levels(obj@meta.data[[field1]]))
+    mapping = map_clusters1(obj@meta.data[[field1]], obj@meta.data[[field2]])
+    obj@meta.data[[field_aligned]] = factor((mapping[obj@meta.data$seurat_clusters]),
+                                            levels(obj@meta.data[[field1]]))
   }
-  
+
   return(obj)
 }
 
@@ -151,96 +472,9 @@ transfer_embedding <- function(sobj,
   return(tobj)
 }
 
-#' Calculate Sample Confidence
-#'
-#' Iteratively performs sub-sampling and PCA, then assigns confidence scores to clusters.
-#'
-#' @param iobj Seurat object to be processed.
-#' @param query Vector of class labels to subsample.
-#' @param reprocess Logical, whether to reprocess the Seurat object during each iteration.
-#' @param n_iter Number of iterations for subsampling.
-#' @param n_sub Number of subsamples per class.
-#' @param n_dims Number of principal components to use for PCA.
-#' @param n_features Number of features to use for variable feature selection.
-#' @param field Metadata field to use for alignment.
-#' @param align Logical, whether to align clusters during each iteration.
-#' @param params List of additional parameters for clustering and UMAP.
-#' @return A dataframe with assigned clusters and confidence scores for each cell.
-#' @export
-calculate_sample_confidence <- function(iobj,
-                                        query = c(1, 2, 3, 4, 5),
-                                        assign = c(1, 2, 3, 4, 5),
-                                        # confounding = c(),
-                                        sigs = NULL,
-                                        markers_field = "markers.scores",
-                                        reprocess = F,
-                                        n_iter = 800,
-                                        n_sub = 600,
-                                        n_dims = 30,
-                                        n_features = 155,
-                                        field = "predicted_clusters",
-                                        align = T,
-                                        params = list("res" = 1.0,
-                                                      "min.dist" = 0.1,
-                                                      "k.param"=10),
-                                        var_features = VariableFeatures(iobj))
-{
-  # iterative sub-sampling based on equal density and reconstruction loss
-  df <- parallel::mclapply(1:n_iter, mc.cores=10, function(i){
-    set.seed(i)
-    
-    # Run dimension reduction on sub-sample
-    subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
-    temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[,subsample],
-                               meta = iobj@meta.data[subsample,],
-                               preprocess = F,
-                               scale.data = iobj[["RNA"]]$scale.data[,subsample],
-                               n_dims = n_dims,
-                               params = list("nfeatures" = n_features),
-                               var_features = var_features)
-    
-    temp_obj = cluster_and_viz(temp_obj,
-                               n_dims = n_dims,
-                               reduction = "pca",
-                               viz = F,
-                               align = align,
-                               field1 = field,
-                               field2 = "seurat_clusters",
-                               field_aligned = "predicted_clusters",
-                               params = params)
-    
-    final = rep(NA, dim(iobj)[2])
-    names(final) = colnames(iobj)
-    final[colnames(temp_obj)] <- as.character(temp_obj@meta.data[["predicted_clusters"]])
-    return(final)
-  })
-  
-  df = do.call("cbind.data.frame", df[which(unlist(lapply(df, length)) == dim(iobj)[2])])
-  colnames(df) <- NULL
-  
-  # do score aggregation
-  assignments <- t(apply(df, 1, label_consensus, query=query))
-  assignments = data.frame(assignments)
-  assignments$confidence <- as.numeric(assignments$confidence)
-  assignments$n <- as.numeric(assignments$n)
-  row.names(assignments) <- colnames(iobj)
-  
-  saveRDS(assignments, "assignments.rds")
-  
-  # get countsßßß
-  counts <- data.frame(t(apply(df, 1, count_assignments, query=query)))
-  row.names(counts) <- colnames(iobj)
-  
-  #merge
-  assignments = cbind(assignments, counts)
-  
-  return(assignments)
-}
-
 calculate_ct_confidence <- function(iobj,
                                     query = c(1, 2, 3, 4, 5),
                                     assign = c(1, 2, 3, 4, 5),
-                                    # confounding = c(),
                                     sigs = NULL,
                                     markers_field = "markers.scores",
                                     reprocess = F,
@@ -256,40 +490,31 @@ calculate_ct_confidence <- function(iobj,
   df <- do.call("cbind", parallel::mclapply(1:n_iter, mc.cores = 10, function(i){
     set.seed(i)
     print(i)
-    
+
     # Run dimension reduction on sub-sample
     subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
-    
-    ###### FOR MOUSE #
-    # temp_obj <- initialize_pca(X = iobj[["RNA"]]@counts[,subsample],
-    #                            meta = iobj@meta.data[subsample,],
-    #                            preprocess = F,
-    #                            scale.data = iobj[["RNA"]]@scale.data[,subsample],
-    #                            n_dims = n_dims,
-    #                            params = list("nfeatures" = n_features),
-    #                            var_features = var_features)
     temp_obj <- subset(iobj, cellids %in% subsample)
     temp_obj <- FindVariableFeatures(temp_obj, nfeatures = n_features)
     temp_obj <- ScaleData(temp_obj, features = VariableFeatures(temp_obj), verbose = F)
     temp_obj <- RunPCA(temp_obj, features = VariableFeatures(temp_obj), verbose = F)
-    
+
     # extract recon_loss
     X_scaled = temp_obj[["RNA"]]@scale.data
     U = Seurat::Loadings(temp_obj, reduction = "pca")
     recon_loss <- calc_recon_loss(X_scaled[row.names(U),], U, n_dims)
     temp_obj@meta.data$recon_loss = recon_loss
-    
+
     temp_obj = cluster_and_viz(temp_obj,
                                n_dims = n_dims,
                                reduction = "pca",
                                viz = F,
                                align = align,
                                params = params)
-    
+
     ##################################
     # Annotation based on signatures #
     ##################################
-    
+
     temp_obj$seurat_clusters <- paste0("C", temp_obj$seurat_clusters)
     s <- c()
     s$cd <- as.matrix(temp_obj[["RNA"]]@counts)
@@ -298,7 +523,7 @@ calculate_ct_confidence <- function(iobj,
     s$comp.reads <- apply(as.matrix(temp_obj[["RNA"]]@counts), 2, sum)
     s$tpm <- as.matrix(temp_obj[["RNA"]]@counts)
     s$clusters <- temp_obj$seurat_clusters
-    
+
     s <- scRNA_markers_subtype_assign(s,
                                       cell.clusters = s$clusters,
                                       cell.sig = sigs[assign], resolve_ties = T,
@@ -311,197 +536,27 @@ calculate_ct_confidence <- function(iobj,
   }))
   # saveRDS(df, "~/df_tmp.rds")
   # do score aggregation
-  
+
   assignments <- t(apply(df, 1, label_consensus_UD_NTC, query=assign))
   # assignments <- t(apply(df, 1, label_consensus, query=assign))
   assignments = data.frame(assignments)
   assignments$confidence <- as.numeric(assignments$confidence)
   assignments$n <- as.numeric(assignments$n)
   # row.names(assignments) <- colnames(iobj)
-  
+
   # get counts
   counts <- data.frame(t(apply(df, 1, count_assignments, query=assign)))
   # row.names(counts) <- colnames(iobj)
-  
+
   #merge
   assignments = cbind(assignments, counts)
   return(assignments)
-}
-
-calculate_ct_conf_wFilt <- function(iobj,
-                                    query = c(1, 2, 3, 4, 5),
-                                    assign = c(1, 2, 3, 4, 5),
-                                    # confounding = c(),
-                                    sigs = NULL,
-                                    markers_field = "markers.scores",
-                                    filter = c("S.Score","G2M.Score"),
-                                    reprocess = F,
-                                    n_iter = 10,
-                                    n_sub = 500,
-                                    n_dims = 10,
-                                    n_features = 200,
-                                    field = "ct_init",
-                                    align = F,
-                                    params = list("res" = 0.12, "min.dist" = 0.1, "k.param" = 20)
-){
-  # iterative sub-sampling based on equal density and reconstruction loss
-  df <- do.call("cbind", parallel::mclapply(1:n_iter, mc.cores = 10, function(i){
-    set.seed(i)
-    print(i)
-    seed = sample(1:20240, 1)
-    set.seed(seed)
-    
-    # Run dimension reduction on sub-sample
-    subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
-    temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[VariableFeatures(iobj),subsample],
-                               meta = iobj@meta.data[subsample,],
-                               preprocess = F,
-                               scale.data = iobj[["RNA"]]$scale.data[,subsample],
-                               n_dims = n_dims,
-                               params = list("nfeatures" = n_features))
-    
-    pc_cor <- do.call("rbind", lapply(1:n_dims, function(pc){
-      cor(Embeddings(iobj, reduction = "pca")[,pc],iobj@meta.data[,filter])
-    }))
-    row.names(pc_cor) <- paste0("PC_", 1:n_dims)
-    b1 <- unlist(apply(pc_cor, 1, function(x){
-      abs_cor <- abs(x)
-      top <- colnames(pc_cor)[which(abs_cor == max(abs_cor))]
-      any_big_cor <- sum(unlist(lapply(filter, function(c){
-        abs_cor[c] > 0.3
-      })))
-      if ((top %in% filter) & (any_big_cor > 0)) {
-        return(TRUE)
-      } else {
-        return(FALSE)
-      }
-    }))
-    remove_pcs <- row.names(pc_cor)[b1]
-    dims <- 1:n_dims
-    dims <- dims[dims %!in% unlist(lapply(strsplit(remove_pcs, split = "PC_"), function(x) as.integer(x[2])))]
-    
-    temp_obj <- Seurat::FindNeighbors(temp_obj,
-                                      reduction = "pca",
-                                      dims = dims,
-                                      verbose = F,
-                                      k.param = params[["k.param"]])
-    temp_obj <- Seurat::FindClusters(temp_obj, resolution = params[["res"]])
-    
-    ##################################
-    # Annotation based on signatures #
-    ##################################
-    
-    temp_obj$seurat_clusters <- factor(paste0("T", temp_obj$seurat_clusters),
-                                       levels = paste0("T", levels(temp_obj$seurat_clusters)))
-    s <- c()
-    s$cd <- as.matrix(temp_obj[["RNA"]]$counts)
-    s$genes <- row.names(temp_obj)
-    s$cells <- colnames(temp_obj)
-    s$comp.reads <- apply(as.matrix(temp_obj[["RNA"]]$counts), 2, sum)
-    s$tpm <- as.matrix(temp_obj[["RNA"]]$counts)
-    s$clusters <- temp_obj$seurat_clusters
-    
-    s <- scRNA_markers_subtype_assign(s,
-                                      cell.clusters = s$clusters,
-                                      cell.sig = sigs[assign], resolve_ties = F, minZ = 10)
-    s$conv_chart = s$assignments.ttests[levels(temp_obj$seurat_clusters),]
-    s$cell.types = factor(s$conv_chart[temp_obj$seurat_clusters, "cell.type1"],
-                          levels = levels(temp_obj@meta.data[[field]]))
-    # print(table(temp_obj@meta.data[[field]], s$cell.types))
-    
-    final = rep(NA, dim(iobj)[2])
-    names(final) = colnames(iobj)
-    final[colnames(temp_obj)] <- as.character(s$cell.types)
-    return(final)
-  }))
-  
-  saveRDS(df, "out1.rds")
-  
-  # do score aggregation
-  assignments <- t(apply(df, 1, label_consensus, query=assign))
-  assignments = data.frame(assignments)
-  assignments$confidence <- as.numeric(assignments$confidence)
-  assignments$n <- as.numeric(assignments$n)
-  # row.names(assignments) <- colnames(iobj)
-  
-  # get counts
-  counts <- data.frame(t(apply(df, 1, count_assignments, query=assign)))
-  # row.names(counts) <- colnames(iobj)
-  
-  #merge
-  assignments = cbind(assignments, counts)
-  return(assignments)
-}
-
-#' Perform Final Embedding
-#'
-#' Performs final embedding on high-confidence subsampled cells.
-#'
-#' @param iobj Seurat object to be processed.
-#' @param assignments Dataframe with assignment labels and confidence scores.
-#' @param thres Confidence threshold for selecting samples.
-#' @param thres_by_class Class-specific confidence thresholds.
-#' @param n_dims Number of principal components to use for the final embedding.
-#' @param subsample_density List indicating the number of samples to subsample per class.
-#' @return The Seurat object with the final embedding and cluster visualization.
-#' @export
-perform_final_embedding <- function(iobj,
-                                    assignments,
-                                    thres = 0.95,
-                                    thres_by_class = NULL,
-                                    n_dims = 10,
-                                    n_features = 200,
-                                    subsample_density = c("1" = 800,
-                                                          "2" = 500,
-                                                          "3" = 450,
-                                                          "4" = 400,
-                                                          "5" = 50),
-                                    params=list("res" = 0.18, "min.dist" = 0.1, "k.param" = 10),
-                                    return_ref=F){
-  # threshold on confidence
-  if (is.null(thres) & is.null(thres_by_class)) {
-    cells = row.names(assignments)
-  } else if (!is.null(thres) & !is.null(thres_by_class)) {
-    print("Ambiguous thresholding input...")
-    return()
-  } else if (!is.null(thres) & is.null(thres_by_class)) {
-    cells = row.names(dplyr::filter(assignments, confidence > thres))
-  } else {
-    cells = do.call("c", lapply(names(thres_by_class), function(x){
-      xcells = row.names(dplyr::filter(assignments,
-                                       assignment == x,
-                                       confidence >= thres_by_class[x]))
-    }))
-  }
-  
-  # subsample
-  high_conf_cells <- subsample_per_class(assignments,
-                                         cells,
-                                         subsample_density)
-  
-  # fit on high confidence subsample
-  refobj <- initialize_pca(X = iobj[["RNA"]]$counts[,high_conf_cells],
-                           meta = iobj@meta.data[high_conf_cells,],
-                           preprocess = T,
-                           scale.data = NULL,
-                           n_dims = 20,
-                           params = list("nfeatures" = n_features))
-  
-  X_scaled = refobj[["RNA"]]$scale.data
-  U = Seurat::Loadings(refobj, reduction = "pca")
-  feats = intersect(row.names(X_scaled), row.names(U))
-  recon_loss <- calc_recon_loss(X_scaled, U, n_dims)
-  
-  refobj@meta.data$recon_loss <- recon_loss
-  refobj@meta.data$final_predictions <- assignments[colnames(refobj),]$assignment
-  refobj@meta.data$confidence_scores <- assignments[colnames(refobj),]$confidence_scores
-  
-  return(refobj)
 }
 
 #' Map Clusters
 #'
-#' Function that maps clusters between two cluster assignments based on a contingency table.
+#' Custom function that maps clusters between two cluster assignments based on
+#' a contingency table; includes some edge cases.
 #'
 #' @param a vector of cluster assignments from the first method
 #' @param b vector of cluster assignments from the second method
@@ -511,7 +566,7 @@ map_clusters <- function(a, b){
   contingency_matrix = table(a, b)
   cluster_mapping <- apply(contingency_matrix, 2, function(column) {
     rownames(contingency_matrix)[which.max(column)]})
-  
+
   # If there are duplicates:
   dups = cluster_mapping[which(duplicated(cluster_mapping))]
   for (dup in dups){
@@ -527,6 +582,107 @@ map_clusters <- function(a, b){
   }
   return(cluster_mapping)
 }
+
+#' Map Clusters (Kuhn-Munkres)
+#'
+#' Function that maps clusters between two cluster assignments using Kuhn-Munkres
+#'
+#' @param a vector of cluster assignments from the first method
+#' @param b vector of cluster assignments from the second method
+#' @return named vector indicating the mapped cluster assignments
+#' @export
+map_clusters1 <- function(a, b){
+  contingency_matrix = table(b, a)
+  solve = lpSolve::lp.assign(contingency_matrix, direction="max")
+  map = solve$solution
+  colnames(map) = colnames(contingency_matrix)
+  row.names(map) = row.names(contingency_matrix)
+  key = apply(map, 1, function(x){
+    names(x)[x == "1"]
+  })
+  return(key)
+}
+
+#' Visualize Simple Plot
+#'
+#' Function that visualizes clustering results using multiple plots including PCA, UMAP, and reconstruction loss heatmap.
+#'
+#' @param obj Seurat object
+#' @param true_labels string indicating the column name for reconstruction loss (default = "recon_loss")
+#' @param predicted_labels string indicating the column name for cluster assignments (default = "seurat_clusters")
+#' @param custom.colors list of custom color mappings (default = NULL)
+#' @return None, prints plots to console
+#' @export
+visualize_simpleplot <- function(obj,
+                                 true_labels = "labels",
+                                 weak_labels = "seurat_clusters",
+                                 custom.colors = NULL,
+                                 reduction = "umap"){
+  a = Seurat::DimPlot(obj, group.by = true_labels, reduction = reduction)
+  b = Seurat::DimPlot(obj, group.by = weak_labels, reduction = reduction)
+
+  if (!is.null(custom.colors)) {
+    a = a + ggplot2::scale_color_manual(values = custom.colors)
+    b = b + ggplot2::scale_color_manual(values = custom.colors)
+  }
+  print(a+b)
+}
+
+#' Visualize Simple Plot
+#'
+#' Function that visualizes clustering results using multiple plots including PCA, UMAP, and reconstruction loss heatmap.
+#'
+#' @param iobj Seurat object
+#' @param assignments data frame of consensus matrix from phase II!
+#' @param field1 string indicating the column name for the true labels
+#' @param cluster_field string indicating the column name final predicted label
+#' @return None, saves the multiplot visualization to a file
+#' @export
+plot_cm <- function(iobj,
+                    assignments,
+                    field1 = "labels",
+                    field2 = "assignment") {
+  count = table(iobj@meta.data[[field1]],
+                assignments[[field2]])
+  freq = table(iobj@meta.data[[field1]])
+  prop <- sweep(count, 1, freq, "/")
+
+  d = ggplot2::ggplot(data.frame(prop),
+                      ggplot2::aes(x = Var1, y = Var2, fill = Freq)) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_gradient2(low = '#009392',
+                                  mid = '#f6edbd',
+                                  high = '#A01C00',
+                                  midpoint = 0.5) +
+    ggplot2::geom_text(ggplot2::aes(label = round(Freq, 2)), color = "white", size = 4) +
+    ggplot2::ylab("Predicted") +
+    ggplot2::xlab("True") +
+    ggplot2::coord_flip()
+
+  print(d)
+}
+
+#' Visualize Simple Plot
+#'
+#' Function that visualizes clustering results using multiple plots including PCA, UMAP, and reconstruction loss heatmap.
+#'
+#' @param fobj Seurat object
+#' @param features features to plot
+#' @param ncol No. of columns of plots (default = 3)
+#' @return None, prints to console
+#' @export
+plot_sigs <- function(fobj,
+                    features,
+                    ncol = 3) {
+
+  a = Seurat::FeaturePlot(fobj, features = features, ncol = ncol)
+  a = a & ggplot2::scale_color_gradient2(low = '#009392',
+                                    mid = '#f6edbd',
+                                    high = '#A01C00',
+                                    midpoint = 0)
+  print(a)
+}
+
 
 #' Visualize Multiplot
 #'
@@ -558,7 +714,7 @@ visualize_multiplot <- function(obj,
   count = table(obj@meta.data$labels, obj@meta.data[[cluster_field]])
   freq = table(obj@meta.data$labels)
   prop <- sweep(count, 1, freq, "/")
-  
+
   d = ggplot2::ggplot(data.frame(prop), aes(x = Var1, y = Var2, fill = Freq)) +
     geom_tile() +
     ggplot2::scale_fill_gradient2(low = '#009392',
@@ -569,30 +725,30 @@ visualize_multiplot <- function(obj,
     ylab("Predicted") +
     xlab("True") +
     coord_flip()
-  
+
   obj@meta.data$recon_loss_cap <- cap_object(obj@meta.data[[recon_field]], 0.02)
-  # e = Seurat::FeaturePlot(obj, features = "recon_loss_cap", reduction = "umap")
-  # e = e+ggplot2::scale_color_gradient2(low = '#009392',
-  #                                      mid = '#f6edbd',
-  #                                      high = '#A01C00',
-  #                                      midpoint =
-  #                                        median(obj@meta.data$recon_loss_cap))
+  e = Seurat::FeaturePlot(obj, features = "recon_loss_cap", reduction = "umap")
+  e = e+ggplot2::scale_color_gradient2(low = '#009392',
+                                       mid = '#f6edbd',
+                                       high = '#A01C00',
+                                       midpoint =
+                                         median(obj@meta.data$recon_loss_cap))
   f = ggplot2::ggplot(obj@meta.data, aes_string(x = "labels",
                                                 y = recon_field,
                                                 fill = "labels")) +
     ggplot2::geom_boxplot()
-  
+
   if (!is.null(custom.colors)) {
     a = a + scale_color_manual(values = custom.colors)
     b = b + scale_color_manual(values = custom.colors)
     c = c + scale_color_manual(values = custom.colors)
     f = f + scale_fill_manual(values = custom.colors)
   }
-  p = (a + b + c)/(d + f + f)
+  p = (a + b + c)/(d + e + f)
   png(paste0(name, ".png"), units = "in", height = height, width = width, res = 500)
   print(p)
   dev.off()
-  
+
   if (pub) {
     pdf(paste0(name, ".pdf"), height = height, width = width)
     print(p)
@@ -618,7 +774,7 @@ subsample_by_class <- function(query, obj, n_sub, field, seed = 888){
     } else {
       n <- n_sub
     }
-    
+
     sample(colnames(obj)[obj@meta.data[[field]] == x], n)
   }))
   return(subsample )
@@ -648,7 +804,7 @@ subsample_per_class <- function(assignments,
     }
     sample(row.names(tmp)[tmp$assignment== x], n)
   }))
-  
+
   return(subsample)
 }
 
@@ -697,65 +853,4 @@ label_consensus_UD_NTC <- function(x, query){
 count_assignments <- function(x, query){
   x <- factor(x, levels = c(query, "UD"))
   return(table(x))
-}
-
-visualize_multiplot1 <- function(obj,
-                                 name = "",
-                                 recon_field = "recon_loss",
-                                 cluster_field = "seurat_clusters",
-                                 pub = T,
-                                 custom.colors = NULL){
-  obj@meta.data$labels <- factor(obj@meta.data$labels)
-  a = Seurat::DimPlot(obj, group.by = "labels", reduction = "pca")
-  b = Seurat::DimPlot(obj, group.by = "labels", reduction = "ref.umap")
-  c = Seurat::DimPlot(obj, group.by = cluster_field, reduction = "ref.umap")
-  if (!is.null(custom.colors)) {
-    a = a + ggplot2::scale_color_manual(values = custom.colors)
-    b = b + ggplot2::scale_color_manual(values = custom.colors)
-    c = c + ggplot2::scale_color_manual(values = custom.colors)
-  }
-  count = table(obj@meta.data$labels, obj@meta.data[[cluster_field]])
-  freq = table(obj@meta.data$labels)
-  prop <- sweep(count, 1, freq, "/")
-  
-  d = ggplot2::ggplot(data.frame(prop), aes(x = Var1, y = Var2, fill = Freq)) +
-    geom_tile() +
-    ggplot2::scale_fill_gradient2(low = '#009392',
-                                  mid = '#f6edbd',
-                                  high = '#A01C00',
-                                  midpoint = 0.5) +
-    geom_text(aes(label = round(Freq, 4)), color = "white", size = 4) +
-    xlab("True") +
-    ylab("Predicted") +
-    coord_flip()
-  
-  obj@meta.data$recon_loss_cap <- cap_object(obj@meta.data[[recon_field]], 0.02)
-  e = Seurat::FeaturePlot(obj, features = "recon_loss_cap", reduction = "ref.umap")
-  e = e+ggplot2::scale_color_gradient2(low = '#009392',
-                                       mid = '#f6edbd',
-                                       high = '#A01C00',
-                                       midpoint =
-                                         median(obj@meta.data$recon_loss_cap))
-  f = ggplot2::ggplot(obj@meta.data, aes_string(x = "labels",
-                                                y = recon_field,
-                                                fill = "labels")) +
-    ggplot2::geom_boxplot() +
-    ylim(0, 5)
-  
-  if (!is.null(custom.colors)) {
-    a = a + scale_color_manual(values = custom.colors)
-    b = b + scale_color_manual(values = custom.colors)
-    c = c + scale_color_manual(values = custom.colors)
-    f = f + scale_fill_manual(values = custom.colors)
-  }
-  p = (a + b + c)/(d + e + f)
-  png(paste0(name, ".png"), units = "in", height = 8, width = 12, res = 500)
-  print(p)
-  dev.off()
-  
-  if (pub) {
-    pdf(paste0(name, ".pdf"), height = 8, width = 12)
-    print(p)
-    dev.off()
-  }
 }

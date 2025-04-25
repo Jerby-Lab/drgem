@@ -1,0 +1,115 @@
+---
+title: "DR-GEM tutorial for tubo-ovarian cancer spatial transcriptomics"
+author: "Christine Yiwen Yeh"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+For this tutorial, we are applying DR-GEM to a subsampled human tubo-ovarian cancer spatial transcriptomics dataset, but first, lets load the DR-GEM algorithm: 
+
+```{r packages, message=FALSE, warning=FALSE, paged.print=FALSE}
+library(drgem, quietly = T)
+```
+
+## Phase I: Distributionally robust initialization of “weak” labels
+
+DR-GEM first fits a standard embedding (E(0)) using classic dimensionality reduction (e.g. PCA) and computes the RE per cell. Under the key observation that minority/rare latent populations are at risk of enrichment in the right tail of the RE distribution, DR-GEM fits a new embedding E(init) on cells with the highest RE values from E(0), thereby shifting the dimensionality reduction algorithm’s focus to these putative high-risk cells. DR-GEM then projects all remainder cells to the E(init) subspace and uses this embedding of cells to identify initial clusters c(1). In the code below, these initial clusters are stored in the `weak_labels` field of the initialized object: `iobj`. 
+
+```{r phaseI, message=FALSE, warning=FALSE}
+cd = readRDS("../data/tubo-ovarian_st_sub_cd.rds")
+meta.data = readRDS("../data/tubo-ovarian_st_sub_meta.rds")
+
+iobj <- drgem_phaseI(cd,
+                     meta.data,
+                     preprocess = T,
+                     scale.data = NULL,
+                     n_dims = 20,
+                     params1 = list("nfeatures" = 960),
+                     params2 = list("res" = 0.12, "min.dist" = 0.1,
+                                    "k.param" = 20, "return.model" = F))
+
+visualize_simpleplot(iobj,
+                     true_labels = "cell.types", 
+                     weak_labels = "weak_clusters",
+                     custom.colors = list("#56B4E9", "#E69F00",
+                                          "#D55E00", "#009E73","#A869DB",
+                                          "#000000"))
+```
+
+## Phase II: Balanced consensus learning
+
+In this phase, DR-GEM applies consensus learning, a technique in ensemble machine learning where an array of models is fit, each based on a subset of the data, and the results can then be aggregated to increase accuracy and consistency. To promote latent class balance, DR-GEM randomly samples uniformly from the initial clusters c(1),  effectively upweighting minority/rare cells across each of the _r_ unique subsamples (here, set to 800 iterations). DR-GEM fits a lower dimensional embedding and generates cluster annotations for each of the _r_ unique subsamples. This yields an ensemble of cluster predictions for each cell. Cluster annotations in each run are aligned via the Kuhn-Munkres algorithm to consolidate the annotations. This then allows for DR-GEM to aggregate the solutions by assigning each cell to the cluster it is most frequently assigned to. A confidence score is also computed per cell to denote the fraction of runs where the cell was assigned to its final cluster.
+
+```{r phaseII, message=FALSE, warning=FALSE}
+if (!file.exists("../data/tubo-ovarian_st_assignments.rds")) {
+  assignments = drgem_phaseII(iobj,
+                              query = c(1, 2, 3, 4, 5, 6),
+                              reprocess = F,
+                              n_iter = 800,
+                              n_sub = 1000,
+                              n_dims = 20,
+                              field = "weak_clusters",
+                              n_features = 960,
+                              params=list("res" = 0.12,
+                                          "min.dist" = 0.1,
+                                          "k.param" =10,
+                                          "return.model" = F),
+                              align = T)
+} else {
+  assignments = readRDS("../data/tubo-ovarian_st_assignments.rds")
+}
+
+plot_cm(iobj, 
+        assignments,
+        "cell.types",
+        "assignment")
+```
+
+## Phase III Aggregation and High Confidence Reference Mapping.
+
+Here, DR-GEM performs balanced subsampling of high confidence cells across the final clusters to generate a final reference embedding to which all the cells are projected to for visualization and clustering. High confidence cells are defined as cells with s > t, where t is a user-defined parameter. This yields a final fairness-aware visualization of the data on top of the final "strong" predictions. The `out` object below contains the full object in slot 1 and the reference object in slot 2. 
+
+```{r phaseIII, message=FALSE, warning=FALSE}
+out <- drgem_phaseIII(iobj,
+                 assignments,
+                 thres = NULL,
+                 thres_by_class = c("1" = 0.95,
+                                    "2" = 0.95,
+                                    "3" = 0.95,
+                                    "4" = 0.95,
+                                    "5" = 0.95,
+                                    "6" = 0.5),
+                 n_dims = 20,
+                 n_features = 960,
+                 subsample_density = c("1" = 620,
+                                       "2" = 480,
+                                       "3" = 150,
+                                       "4" = 150,
+                                       "5" = 270,
+                                       "6" = 60),
+                 return_ref = T)
+
+visualize_simpleplot(out[[1]], "cell.types", "final_predictions", 
+                     custom.colors = list("#56B4E9", "#E69F00",
+                                          "#D55E00", "#009E73","#A869DB",
+                                          "#000000"),
+                     reduction = "ref.umap")
+```
+
+## Phase IV: Signature-based Annotation
+
+This is the last and optional phase that provides functionality to utilize the expression of cell types/state signatures to automatically map clusters to known cell types. This last function helps render DR-GEM an end-to-end single cell tool. 
+
+```{r phaseIV, message=FALSE, warning=FALSE}
+cell.sig <- readRDS("../data/tubo-ovarian_cell.sigs.rds")
+final <- drgem_phaseIV(out[[2]],
+                      cell.clusters = out[[2]]$final_predictions,
+                     cell.sig)
+
+plot_sigs(final[[1]], features = names(cell.sig))
+saveRDS(final, "../results/tubo-ovarian_sub_results.rds")
+```
