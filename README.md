@@ -11,7 +11,7 @@ or download the compressed R package and use:
 `devtools::install("drgem")`
 
 # **Citation**
-Please cite this work at: 
+Please cite this work: Yeh _et al_. *Distributionally robust and balanced consensus learning for single cell genomics.* (2025)
 
 # **License** 
 
