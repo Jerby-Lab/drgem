@@ -17,6 +17,6 @@ Please cite this work: Yeh _et al_. **Distributionally robust and balanced conse
 
 BSD 3-Clause License provided ([here](https://github.com/Jerby-Lab/drgem/blob/main/LICENSE)).
 
-## **Contact**
+# **Contact**
 
 For any inquiries on this repository please feel free to post these under "issues" or reach out to Christine Yiwen Yeh ([cyyeh@stanford.edu](cyyeh@stanford.edu)) and Livnat Jerby ([ljerby@stanford.edu](ljerby@stanford.edu)).
