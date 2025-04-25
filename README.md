@@ -4,10 +4,10 @@ DR-GEM is a  self-supervised meta-algorithm that combines principles in distribu
 
 # **Quick start**
 
-To install DR-GEM you can eiher run:  
+To install DR-GEM you can eiher run: 
 `devtools::install_github(repo = "https://github.com/Jerby-Lab/drgem")`
 
-or download the compressed R package and use 
+or download the compressed R package and use: 
 `devtools::install("drgem")`
 
 # **Citation**
