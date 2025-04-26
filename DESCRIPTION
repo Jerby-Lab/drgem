@@ -1,10 +1,15 @@
 Package: drgem
-Title: What the Package Does (One Line, Title Case)
-Version: 0.0.0.9000
+Title: DR-GEM: Distributionally Robust latent Group-awarE consensus
+    Machine learning for single cell genomics
+Version: 0.0.1
 Authors@R: 
-    person("First", "Last", , "first.last@example.com", role = c("aut", "cre"),
-           comment = c(ORCID = "YOUR-ORCID-ID"))
-Description: What the package does (one paragraph).
+    person("Christine", "Yeh", , "christineyyeh@gmail.com", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0003-4217-8555"))
+Description: DR-GEM is a self-supervised meta-algorithm that combines
+    principles in distributionally robust optimization with balanced
+    consensus machine learning to overcome the challenges of latent class
+    imbalance in analysis pipelines featuring dimensionality reduction and
+    clustering.
 License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
     license
 Encoding: UTF-8
