@@ -5,10 +5,11 @@ DR-GEM is a  self-supervised meta-algorithm that combines principles in distribu
 # **Quick start**
 
 To install DR-GEM you can eiher run: 
-`devtools::install_github(repo = "https://github.com/Jerby-Lab/drgem")`
-
-or download the compressed R package and use: 
+`devtools::install_github(repo = "https://github.com/Jerby-Lab/drgem")` or you can download all the files in this R package and use: 
 `devtools::install("drgem")`
+
+We have provided a tutorial:
+[DR-GEM tutorial on tubo-ovarian cancer spatial transcriptomics dataset](https://htmlpreview.github.io/?https://github.com/Jerby-Lab/drgem/blob/main/vignettes/tutorial_tubo-ovarian.html)
 
 # **Citation**
 Please cite this work: Yeh _et al_. **Distributionally robust and balanced consensus learning for single cell genomics.** (2025)
