@@ -6,7 +6,7 @@ DR-GEM is a  self-supervised meta-algorithm that combines principles in distribu
 
 To install DR-GEM you can eiher run: 
 `devtools::install_github(repo = "https://github.com/Jerby-Lab/drgem")` or you can download all the files in this R package and use: 
-`devtools::install("drgem")`
+`devtools::install("drgem")`. Installation time is estimated to be < 1 minute.
 
 We have provided a tutorial that will be available via the following link when the repository is made public:
 [DR-GEM tutorial on tubo-ovarian cancer spatial transcriptomics dataset](https://htmlpreview.github.io/?https://github.com/Jerby-Lab/drgem/blob/main/vignettes/tutorial_tubo-ovarian.html) or you can download the file in `vignettes/tutorial_tubo-ovarian.html` and view in any web browswer. 
