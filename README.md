@@ -12,8 +12,13 @@ We have provided a tutorial that will be available via the following link when t
 [DR-GEM tutorial on tubo-ovarian cancer spatial transcriptomics dataset](https://htmlpreview.github.io/?https://github.com/Jerby-Lab/drgem/blob/main/vignettes/tutorial_tubo-ovarian.html) or you can download the file in `vignettes/tutorial_tubo-ovarian.html` and view in any web browswer. 
 
 # **Citation**
-Please cite this work: Yeh _et al_. **Distributionally robust and balanced consensus latent label learning: Application to single-cell genomics.** (2025)
+Please cite this work: Yeh _et al_. **Robust self-supervised machine learning for single cell embeddings and annotations.** _bioRxiv_ (2025)
 
+# **Software Requirements**
+
+* R (tested on version 4.3.2 -- "Eye Holes")
+* R library dependencies: lpSolve (5.6.23), plyr (1.8.9), Seurat (5.1.0), SeuratObject (5.0.2), sp (2.1-4), dplyr (1.1.4)
+  
 # **License** 
 
 BSD 3-Clause License provided ([here](https://github.com/Jerby-Lab/drgem/blob/main/LICENSE)).
