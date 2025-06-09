@@ -14,7 +14,7 @@ We have provided a tutorial that will be available via the following link:
 Please note that this repository is associated with a study currently under peer review and may undergo update in the near future
 
 # **Citation**
-Please cite this work: Yeh _et al_. **Robust self-supervised machine learning for single cell embeddings and annotations.** _bioRxiv_ (2025)
+Please cite this work: Yeh _et al_. [**Robust self-supervised machine learning for single cell embeddings and annotations.**](https://www.biorxiv.org/content/10.1101/2025.06.05.658097v1) _bioRxiv_ (2025)
 
 # **Software Requirements**
 
