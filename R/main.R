@@ -80,7 +80,12 @@ drgem_phaseI <- function(X,
 #' @param field Metadata field to use for alignment.
 #' @param align Logical, whether to align clusters during each iteration.
 #' @param params List of additional parameters for clustering and UMAP.
-#' @return A dataframe with assigned clusters and confidence scores for each cell.
+#' @param autoconvergence Boolean to decide whether to run autoconvergence (default = F),
+#' @param r_prime Increment at which to check convergence (default = 100)
+#' @param delta_target Minimum change in cell type assignments (default = 0.05)
+#' @return A list of two objects: (1) A dataframe with assigned clusters and
+#' confidence scores for each cell. and (2) A dataframe with all the labels per
+#' iteration.
 #' @export
 drgem_phaseII <- function(iobj,
                           query = c(1, 2, 3, 4, 5),
@@ -234,7 +239,6 @@ drgem_phaseII <- function(iobj,
               iterations = df))
 }
 
-
 #' Perform Final Embedding
 #'
 #' Performs final embedding on high-confidence subsampled cells.
@@ -371,6 +375,103 @@ drgem_phaseIV <- function(obj,
   obj@meta.data$final_annotations <- r$cell.types
   out <- list(obj, r)
   return(out)
+}
+
+#' Add _r_'' iterations to DR-GEM Phase II
+#'
+#' Functionality for adding _r_'' iterations
+#'
+#' @param df assignments across iterations
+#' @param r_pp number of additional iterations to run
+#' @param iobj Seurat object to be processed.
+#' @param query Vector of class labels to subsample.
+#' @param reprocess Logical, whether to reprocess the Seurat object during each iteration.
+#' @param n_iter Number of iterations for subsampling.
+#' @param n_sub Number of subsamples per class.
+#' @param n_dims Number of principal components to use for PCA.
+#' @param n_features Number of features to use for variable feature selection.
+#' @param field Metadata field to use for alignment.
+#' @param align Logical, whether to align clusters during each iteration.
+#' @param params List of additional parameters for clustering and UMAP.
+#' @return A list of two objects: (1) A dataframe with assigned clusters and
+#' confidence scores for each cell. and (2) A list with the proportion of
+#' change of each cell cluster after the additional _r_'' iterations.
+#' @export
+add_iterations_drgemII <- function(df, r_pp, iobj,
+                             query = c(1, 2, 3, 4, 5),
+                             assign = c(1, 2, 3, 4, 5),
+                             # confounding = c(),
+                             sigs = NULL,
+                             markers_field = "markers.scores",
+                             reprocess = F,
+                             n_iter = 800,
+                             n_sub = 600,
+                             n_dims = 30,
+                             n_features = 155,
+                             field = "predicted_clusters",
+                             align = T,
+                             params = list("res" = 1.0,
+                                           "min.dist" = 0.1,
+                                           "k.param"=10,
+                                           "return.model"= F),
+                             var_features = row.names(iobj)) {
+  prev = dim(df)[2]
+  iters = 1:r_pp + prev
+  df_add <- parallel::mclapply(iters, mc.cores=10, function(i){
+    set.seed(i)
+
+    # run dimension reduction on balanced sub-sample
+    subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
+    temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[,subsample],
+                               meta = iobj@meta.data[subsample,],
+                               preprocess = F,
+                               scale.data = iobj[["RNA"]]$scale.data[,subsample],
+                               n_dims = n_dims,
+                               params = list("nfeatures" = n_features),
+                               var_features = var_features)
+
+    # run clustering on balanced sub-sample
+    temp_obj = cluster_and_viz(temp_obj,
+                               n_dims = n_dims,
+                               reduction = "pca",
+                               viz = F,
+                               align = align,
+                               field1 = field,
+                               field2 = "seurat_clusters",
+                               field_aligned = "predicted_clusters",
+                               params = params)
+
+    final = rep(NA, dim(iobj)[2])
+    names(final) = colnames(iobj)
+    final[colnames(temp_obj)] <- as.character(temp_obj@meta.data[["predicted_clusters"]])
+    return(final)
+  })
+  df_add = do.call("cbind.data.frame",
+                   df_add[which(unlist(lapply(df_add, length)) == dim(iobj)[2])])
+  colnames(df_add) <- NULL
+  df = cbind(df, df_add)
+
+  assignments <- t(apply(df, 1, label_consensus, query=query))
+  assignments = data.frame(assignments)
+  assignments$confidence <- as.numeric(assignments$confidence)
+  assignments$n <- as.numeric(assignments$n)
+  row.names(assignments) <- colnames(iobj)
+
+  last_ass <- t(apply(df[,1:prev], 1, label_consensus, query=query))
+  last_ass = data.frame(last_ass)
+  last_ass$confidence <- as.numeric(last_ass$confidence)
+  last_ass$n <- as.numeric(last_ass$n)
+  row.names(last_ass) <- colnames(iobj)
+
+  # get d
+  d = unlist(lapply(query, function(x){
+    tmp = dplyr::filter(assignments, assignment == x)
+    tmp1 = last_ass[row.names(tmp),]
+    sum(tmp$assignment != tmp1$assignment)/length(tmp$assignment)
+  }))
+
+  return(list(assignments = assignments,
+              deltas = d))
 }
 
 #' Compute _t_-tests
