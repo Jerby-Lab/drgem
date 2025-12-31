@@ -8,9 +8,9 @@
 #' @param scale.data Number of iterations for subsampling.
 #' @param n_dims Number of subsamples per class.
 #' @param beta Number of principal components to use for PCA.
-#' @param viz Number of features to use for variable feature selection.
-#' @param var_features Metadata field to use for alignment.
-#' @param align Logical, whether to align clusters during each iteration.
+#' @param viz Logical, whether to visualize data (default = T)
+#' @param var_features Number of features to use for variable feature selection.
+#' @param align Logical, whether to align clusters during each iteration (default = T)
 #' @param params List of additional parameters for clustering and UMAP.
 #' @return seurat object with weak labels
 #' @export
