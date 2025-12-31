@@ -18,7 +18,10 @@ drgem_phaseII(
   field = "predicted_clusters",
   align = T,
   params = list(res = 1, min.dist = 0.1, k.param = 10, return.model = F),
-  var_features = row.names(iobj)
+  var_features = row.names(iobj),
+  autoconvergence = F,
+  r_prime = 100,
+  delta_target = 0.05
 )
 }
 \arguments{

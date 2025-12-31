@@ -46,19 +46,20 @@ In this phase, DR-GEM applies consensus learning, a technique in ensemble machin
 
 ```{r phaseII, message=FALSE, warning=FALSE}
 if (!file.exists("../data/tubo-ovarian_st_assignments.rds")) {
-  assignments = drgem_phaseII(iobj,
-                              query = c(1, 2, 3, 4, 5, 6),
-                              reprocess = F,
-                              n_iter = 800,
-                              n_sub = 1000,
-                              n_dims = 20,
-                              field = "weak_clusters",
-                              n_features = 960,
-                              params=list("res" = 0.12,
-                                          "min.dist" = 0.1,
-                                          "k.param" =10,
-                                          "return.model" = F),
-                              align = T)
+  out = drgem_phaseII(iobj,
+                      query = c(1, 2, 3, 4, 5, 6),
+                      reprocess = F,
+                      n_iter = 800,
+                      n_sub = 1000,
+                      n_dims = 20,
+                      field = "weak_clusters",
+                      n_features = 960,
+                      params=list("res" = 0.12,
+                                  "min.dist" = 0.1,
+                                  "k.param" =10,
+                                  "return.model" = F),
+                      align = T)
+  assignments = out[["assignments"]]
 } else {
   assignments = readRDS("../data/tubo-ovarian_st_assignments.rds")
 }
@@ -75,23 +76,23 @@ Here, DR-GEM performs balanced subsampling of high confidence cells across the f
 
 ```{r phaseIII, message=FALSE, warning=FALSE}
 out <- drgem_phaseIII(iobj,
-                 assignments,
-                 thres = NULL,
-                 thres_by_class = c("1" = 0.95,
-                                    "2" = 0.95,
-                                    "3" = 0.95,
-                                    "4" = 0.95,
-                                    "5" = 0.95,
-                                    "6" = 0.5),
-                 n_dims = 20,
-                 n_features = 960,
-                 subsample_density = c("1" = 620,
-                                       "2" = 480,
-                                       "3" = 150,
-                                       "4" = 150,
-                                       "5" = 270,
-                                       "6" = 60),
-                 return_ref = T)
+                      assignments,
+                      thres = NULL,
+                      thres_by_class = c("1" = 0.95,
+                                         "2" = 0.95,
+                                         "3" = 0.95,
+                                         "4" = 0.95,
+                                         "5" = 0.95,
+                                         "6" = 0.5),
+                      n_dims = 20,
+                      n_features = 960,
+                      subsample_density = c("1" = 620,
+                                            "2" = 480,
+                                            "3" = 150,
+                                            "4" = 150,
+                                            "5" = 270,
+                                            "6" = 60),
+                      return_ref = T)
 
 visualize_simpleplot(out[[1]], "cell.types", "final_predictions", 
                      custom.colors = list("#56B4E9", "#E69F00",
@@ -107,8 +108,8 @@ This is the last and optional phase that provides functionality to utilize the e
 ```{r phaseIV, message=FALSE, warning=FALSE}
 cell.sig <- readRDS("../data/tubo-ovarian_cell.sigs.rds")
 final <- drgem_phaseIV(out[[2]],
-                      cell.clusters = out[[2]]$final_predictions,
-                     cell.sig)
+                       cell.clusters = out[[2]]$final_predictions,
+                       cell.sig)
 
 plot_sigs(final[[1]], features = names(cell.sig))
 saveRDS(final, "../results/tubo-ovarian_sub_results.rds")

@@ -99,41 +99,121 @@ drgem_phaseII <- function(iobj,
                                         "min.dist" = 0.1,
                                         "k.param"=10,
                                         "return.model"= F),
-                          var_features = row.names(iobj))
+                          var_features = row.names(iobj),
+                          autoconvergence = F,
+                          r_prime = 100,
+                          delta_target = 0.05
+)
 {
   # iterative sub-sampling based on equal density of weak labels
-  df <- parallel::mclapply(1:n_iter, mc.cores=10, function(i){
-    set.seed(i)
+  if (autoconvergence){
+    print("Running Autoconvergence...")
+    n_batch = round(c(n_iter/r_prime))
+    d = rep(1, length(query)) # initialize delta
+    batch = 1 # start batch
+    df = data.frame(row.names = colnames(iobj)) # initialize iteration data.frame
+    while (sum(d >= delta_target) != 0 & batch <= n_batch) {
+      print(batch)
+      # run batch
+      iters = 1:r_prime + r_prime*(batch - 1)
+      df_tmp = parallel::mclapply(iters, mc.cores = 10, function(i){
+        set.seed(i)
+        # run dimension reduction on balanced sub-sample
+        subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
+        temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[,subsample],
+                                   meta = iobj@meta.data[subsample,],
+                                   preprocess = F,
+                                   scale.data = iobj[["RNA"]]$scale.data[,subsample],
+                                   n_dims = n_dims,
+                                   params = list("nfeatures" = n_features),
+                                   var_features = var_features)
 
-    # run dimension reduction on balanced sub-sample
-    subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
-    temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[,subsample],
-                               meta = iobj@meta.data[subsample,],
-                               preprocess = F,
-                               scale.data = iobj[["RNA"]]$scale.data[,subsample],
-                               n_dims = n_dims,
-                               params = list("nfeatures" = n_features),
-                               var_features = var_features)
+        # run clustering on balanced sub-sample
+        temp_obj = cluster_and_viz(temp_obj,
+                                   n_dims = n_dims,
+                                   reduction = "pca",
+                                   viz = F,
+                                   align = align,
+                                   field1 = field,
+                                   field2 = "seurat_clusters",
+                                   field_aligned = "predicted_clusters",
+                                   params = params)
 
-    # run clustering on balanced sub-sample
-    temp_obj = cluster_and_viz(temp_obj,
-                               n_dims = n_dims,
-                               reduction = "pca",
-                               viz = F,
-                               align = align,
-                               field1 = field,
-                               field2 = "seurat_clusters",
-                               field_aligned = "predicted_clusters",
-                               params = params)
+        final = rep(NA, dim(iobj)[2])
+        names(final) = colnames(iobj)
+        final[colnames(temp_obj)] <- as.character(temp_obj@meta.data[["predicted_clusters"]])
+        return(final)
+      })
+      df_tmp1 = do.call("cbind.data.frame",
+                        df_tmp[which(unlist(lapply(df_tmp, length)) == dim(iobj)[2])])
+      df = cbind.data.frame(df, df_tmp1)
 
-    final = rep(NA, dim(iobj)[2])
-    names(final) = colnames(iobj)
-    final[colnames(temp_obj)] <- as.character(temp_obj@meta.data[["predicted_clusters"]])
-    return(final)
-  })
+      # assess batch
+      assignments <- t(apply(df, 1, label_consensus, query=query))
+      assignments = data.frame(assignments)
+      assignments$confidence <- as.numeric(assignments$confidence)
+      assignments$n <- as.numeric(assignments$n)
+      row.names(assignments) <- colnames(iobj)
 
-  df = do.call("cbind.data.frame", df[which(unlist(lapply(df, length)) == dim(iobj)[2])])
-  colnames(df) <- NULL
+      # if each cell has been sampled at least 5 times
+      if (min(assignments$n) > 5) {
+        # get last batch results
+        last_iter = r_prime + r_prime*(batch - 2)
+        last_ass <- t(apply(df[,1:last_iter], 1, label_consensus, query=query))
+        last_ass = data.frame(last_ass)
+        last_ass$confidence <- as.numeric(last_ass$confidence)
+        last_ass$n <- as.numeric(last_ass$n)
+        row.names(last_ass) <- colnames(iobj)
+
+        # get d
+        d = unlist(lapply(query, function(x){
+          tmp = dplyr::filter(assignments, assignment == x)
+          tmp1 = last_ass[row.names(tmp),]
+          sum(tmp$assignment != tmp1$assignment)/length(tmp$assignment)
+        }))
+      }
+      batch = batch + 1
+    }
+    # convergence statement
+    if (batch > n_batch) {
+      print(paste0("DR-GEM Phase II ran the specified ", n_iter, " iterations"))
+    } else {
+      print(paste0("DR-GEM Phase II converged in ", batch*r_prime, "iterations"))
+    }
+    colnames(df) <- NULL
+  } else {
+    df <- parallel::mclapply(1:n_iter, mc.cores=10, function(i){
+      set.seed(i)
+
+      # run dimension reduction on balanced sub-sample
+      subsample <- subsample_by_class(query, iobj, n_sub, field = field, seed =i)
+      temp_obj <- initialize_pca(X = iobj[["RNA"]]$counts[,subsample],
+                                 meta = iobj@meta.data[subsample,],
+                                 preprocess = F,
+                                 scale.data = iobj[["RNA"]]$scale.data[,subsample],
+                                 n_dims = n_dims,
+                                 params = list("nfeatures" = n_features),
+                                 var_features = var_features)
+
+      # run clustering on balanced sub-sample
+      temp_obj = cluster_and_viz(temp_obj,
+                                 n_dims = n_dims,
+                                 reduction = "pca",
+                                 viz = F,
+                                 align = align,
+                                 field1 = field,
+                                 field2 = "seurat_clusters",
+                                 field_aligned = "predicted_clusters",
+                                 params = params)
+
+      final = rep(NA, dim(iobj)[2])
+      names(final) = colnames(iobj)
+      final[colnames(temp_obj)] <- as.character(temp_obj@meta.data[["predicted_clusters"]])
+      return(final)
+    })
+    df = do.call("cbind.data.frame", df[which(unlist(lapply(df, length)) == dim(iobj)[2])])
+    colnames(df) <- NULL
+  }
 
   # do score aggregation
   assignments <- t(apply(df, 1, label_consensus, query=query))
@@ -148,7 +228,10 @@ drgem_phaseII <- function(iobj,
 
   #merge
   assignments = cbind(assignments, counts)
-  return(assignments)
+
+  #return
+  return(list(assigments = assignments,
+              iterations = df))
 }
 
 
@@ -672,14 +755,14 @@ plot_cm <- function(iobj,
 #' @return None, prints to console
 #' @export
 plot_sigs <- function(fobj,
-                    features,
-                    ncol = 3) {
+                      features,
+                      ncol = 3) {
 
   a = Seurat::FeaturePlot(fobj, features = features, ncol = ncol)
   a = a & ggplot2::scale_color_gradient2(low = '#009392',
-                                    mid = '#f6edbd',
-                                    high = '#A01C00',
-                                    midpoint = 0)
+                                         mid = '#f6edbd',
+                                         high = '#A01C00',
+                                         midpoint = 0)
   print(a)
 }
 
