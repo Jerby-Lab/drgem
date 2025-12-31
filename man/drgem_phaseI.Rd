@@ -34,11 +34,11 @@ drgem_phaseI(
 
 \item{beta}{Number of principal components to use for PCA.}
 
-\item{viz}{Number of features to use for variable feature selection.}
+\item{viz}{Logical, whether to visualize data (default = T)}
 
-\item{var_features}{Metadata field to use for alignment.}
+\item{var_features}{Number of features to use for variable feature selection.}
 
-\item{align}{Logical, whether to align clusters during each iteration.}
+\item{align}{Logical, whether to align clusters during each iteration (default = T)}
 
 \item{params}{List of additional parameters for clustering and UMAP.}
 }

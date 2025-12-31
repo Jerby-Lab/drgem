@@ -2,6 +2,7 @@
 
 S3method(t,test.mat)
 export("%!in%")
+export(add_iterations_drgemII)
 export(average.mat.rows)
 export(calc_mse)
 export(calc_recon_loss)
