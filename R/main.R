@@ -801,13 +801,36 @@ visualize_simpleplot <- function(obj,
                                  true_labels = "labels",
                                  weak_labels = "seurat_clusters",
                                  custom.colors = NULL,
-                                 reduction = "umap"){
-  a = Seurat::DimPlot(obj, group.by = true_labels, reduction = reduction)
-  b = Seurat::DimPlot(obj, group.by = weak_labels, reduction = reduction)
+                                 type1 = "discrete",
+                                 type2 = "discrete",
+                                 reduction = "umap",
+                                 midpoint = NULL){
+  if (type1 == "cont") {
+    a = Seurat::FeaturePlot(obj,
+                                features = true_labels, reduction = "umap")
+    b = b+ggplot2::scale_color_gradient2(low = '#A01C00',
+                                         mid = '#f6edbd',
+                                         high = '#009392',
+                                         midpoint = midpoint)
+  } else {
+    a = Seurat::DimPlot(obj, group.by = true_labels, reduction = reduction)
+    if (!is.null(custom.colors)) {
+      a = a + ggplot2::scale_color_manual(values = custom.colors)
+    }
+  }
 
-  if (!is.null(custom.colors)) {
-    a = a + ggplot2::scale_color_manual(values = custom.colors)
-    b = b + ggplot2::scale_color_manual(values = custom.colors)
+  if (type2 == "cont") {
+    b = Seurat::FeaturePlot(obj,
+    features = weak_labels, reduction = "umap")
+    b = b+ggplot2::scale_color_gradient2(low = '#A01C00',
+                                     mid = '#f6edbd',
+                                     high = '#009392',
+                                     midpoint = midpoint)
+  } else {
+    b = Seurat::DimPlot(obj, group.by = weak_labels, reduction = reduction)
+    if (!is.null(custom.colors)) {
+      b = b + ggplot2::scale_color_manual(values = custom.colors)
+    }
   }
   print(a+b)
 }

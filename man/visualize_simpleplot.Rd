@@ -9,7 +9,10 @@ visualize_simpleplot(
   true_labels = "labels",
   weak_labels = "seurat_clusters",
   custom.colors = NULL,
-  reduction = "umap"
+  type1 = "discrete",
+  type2 = "discrete",
+  reduction = "umap",
+  midpoint = NULL
 )
 }
 \arguments{

@@ -114,3 +114,21 @@ final <- drgem_phaseIV(out[[2]],
 plot_sigs(final[[1]], features = names(cell.sig))
 saveRDS(final, "../results/tubo-ovarian_sub_results.rds")
 ```
+
+## Visualizing consensus labels on original/standard embeddings
+
+We have provided a code snippet of visualization of the results by allowing users to plot the final consensus labels on top of the original/standard embeddings of any dataset. 
+
+```{r add_viz, message=FALSE, warning=FALSE}
+og = readRDS("../results/tubo-ovarian_sub_original.rds")
+og$final_labels = assignments$assignment
+og$confidence_scores = assignments$confidence
+visualize_simpleplot(og,
+                     "final_labels",
+                     "confidence_scores",
+                     type2 = "cont",
+                     custom.colors = list("#56B4E9", "#E69F00",
+                                          "#D55E00", "#009E73","#A869DB",
+                                          "#000000"),
+                     midpoint = 0.8)
+```
